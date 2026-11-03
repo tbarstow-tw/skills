@@ -1,0 +1,602 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "system-drawing/system-model.schema.json",
+  "title": "System drawing model",
+  "description": "One model per drawing. build.py validates it, embeds it in the sheet, and runs the model checks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "subject",
+    "lanes",
+    "components",
+    "interfaces",
+    "flows",
+    "notes",
+    "evidence",
+    "key_figures",
+    "views"
+  ],
+  "$defs": {
+    "evidence_tags": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^e[0-9]+$"
+      }
+    },
+    "confidence": {
+      "enum": [
+        "VERIFIED",
+        "OBSERVED",
+        "DOCUMENTED",
+        "INFERRED",
+        "TBD"
+      ]
+    },
+    "short": {
+      "type": "string",
+      "maxLength": 22
+    }
+  },
+  "properties": {
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "title",
+        "question",
+        "decision",
+        "dwg_no",
+        "rev",
+        "date",
+        "sources"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "change",
+            "question",
+            "research"
+          ]
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 28
+        },
+        "kicker": {
+          "type": "string"
+        },
+        "question": {
+          "type": "string"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "dwg_no": {
+          "type": "string",
+          "pattern": "^SYS-[A-Z0-9]+-[0-9]{3}$"
+        },
+        "rev": {
+          "type": "string"
+        },
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "scope_note": {
+          "type": "string"
+        },
+        "general_notes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 8
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "name",
+              "ref",
+              "sha"
+            ],
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "ref": {
+                "type": "string"
+              },
+              "sha": {
+                "type": "string",
+                "pattern": "^[0-9a-f]{7,40}$"
+              },
+              "date": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
+    "lanes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 7,
+      "items": {
+        "enum": [
+          "CLIENT",
+          "EDGE",
+          "SERVICE",
+          "ASYNC",
+          "DATA",
+          "EXTERNAL",
+          "PLATFORM"
+        ]
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 22,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "name",
+          "kind",
+          "lane",
+          "scope",
+          "responsibility",
+          "evidence",
+          "confidence"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[CDX][0-9]+$"
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 20
+          },
+          "kind": {
+            "enum": [
+              "service",
+              "web-app",
+              "browser",
+              "store",
+              "queue",
+              "managed",
+              "vendor",
+              "ci",
+              "job",
+              "gateway"
+            ]
+          },
+          "lane": {
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "CHANGE",
+              "FOCUS",
+              "TOUCH",
+              "CONTEXT",
+              "OUT"
+            ]
+          },
+          "responsibility": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence_tags"
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          },
+          "plan": {
+            "type": "boolean",
+            "description": "false keeps the item in the tables and register but off the context plan and layer stack. Use it for CONTEXT leaves and repeated edges when the plan is too dense."
+          }
+        }
+      }
+    },
+    "interfaces": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "name",
+          "from",
+          "to",
+          "style",
+          "protocol",
+          "evidence",
+          "confidence"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^I[0-9]+$"
+          },
+          "name": {
+            "$ref": "#/$defs/short"
+          },
+          "from": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "style": {
+            "enum": [
+              "sync",
+              "async",
+              "data"
+            ]
+          },
+          "protocol": {
+            "type": "string",
+            "maxLength": 14,
+            "description": "Shown in the Value column. Keep it short (HTTPS, STS SDK); put detail in operation."
+          },
+          "operation": {
+            "type": "string"
+          },
+          "auth": {
+            "type": "string"
+          },
+          "gate": {
+            "type": "string"
+          },
+          "timeout": {
+            "type": "string",
+            "pattern": "^(T[0-9]+|\\[TBD\\]|none)$",
+            "description": "A T budget code, [TBD], or none when the source sets no timeout."
+          },
+          "retries": {
+            "type": "string",
+            "pattern": "^(N[0-9]+|\\[TBD\\]|none|unbounded)$",
+            "description": "An N budget code, [TBD], none when the source does not retry, or unbounded when it retries with no cap."
+          },
+          "failure": {
+            "type": "string",
+            "maxLength": 34
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence_tags"
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          },
+          "plan": {
+            "type": "boolean",
+            "description": "false keeps the item in the tables and register but off the context plan and layer stack. Use it for CONTEXT leaves and repeated edges when the plan is too dense."
+          }
+        }
+      }
+    },
+    "flows": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "id",
+          "name",
+          "trigger",
+          "steps",
+          "evidence"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[a-z0-9-]+$"
+          },
+          "name": {
+            "type": "string"
+          },
+          "trigger": {
+            "type": "string"
+          },
+          "critical": {
+            "type": "boolean"
+          },
+          "steps": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "pattern": "^I[0-9]+$"
+            }
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence_tags"
+          }
+        }
+      }
+    },
+    "boundaries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "name",
+          "kind",
+          "members",
+          "enforced_by",
+          "evidence",
+          "confidence"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^B[0-9]+$"
+          },
+          "name": {
+            "$ref": "#/$defs/short"
+          },
+          "kind": {
+            "enum": [
+              "trust",
+              "network",
+              "account",
+              "deploy",
+              "team"
+            ]
+          },
+          "members": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string"
+            }
+          },
+          "enforced_by": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence_tags"
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          }
+        }
+      }
+    },
+    "budgets": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "name",
+          "value",
+          "evidence",
+          "confidence"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[TLNM][0-9]+$"
+          },
+          "name": {
+            "$ref": "#/$defs/short"
+          },
+          "value": {
+            "type": "string",
+            "maxLength": 12
+          },
+          "formula": {
+            "type": "string"
+          },
+          "applies_to": {
+            "type": "string"
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence_tags"
+          },
+          "confidence": {
+            "$ref": "#/$defs/confidence"
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "n",
+          "text",
+          "evidence"
+        ],
+        "properties": {
+          "n": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 140
+          },
+          "at": {
+            "type": "string"
+          },
+          "confidence": {
+            "enum": [
+              "VERIFIED",
+              "OBSERVED",
+              "DOCUMENTED",
+              "INFERRED"
+            ],
+            "description": "Optional. INFERRED shows ? after the note number."
+          },
+          "evidence": {
+            "$ref": "#/$defs/evidence_tags"
+          }
+        }
+      }
+    },
+    "unknowns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "item",
+          "resolve_by"
+        ],
+        "properties": {
+          "item": {
+            "type": "string"
+          },
+          "resolve_by": {
+            "type": "string"
+          },
+          "blocks_decision": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "tag",
+          "kind",
+          "locator"
+        ],
+        "properties": {
+          "tag": {
+            "type": "string",
+            "pattern": "^e[0-9]+$"
+          },
+          "kind": {
+            "enum": [
+              "code",
+              "iac",
+              "doc",
+              "ci",
+              "runtime",
+              "wiki",
+              "ticket"
+            ]
+          },
+          "locator": {
+            "type": "string"
+          },
+          "what": {
+            "type": "string"
+          },
+          "date": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "key_figures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 7,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "code",
+          "label",
+          "value"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "value": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "views": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence_flow",
+        "detail"
+      ],
+      "properties": {
+        "sequence_flow": {
+          "type": "string"
+        },
+        "detail": {
+          "enum": [
+            "failure",
+            "blast_radius"
+          ]
+        },
+        "failure_interface": {
+          "type": "string",
+          "pattern": "^I[0-9]+$"
+        },
+        "blast_radius": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "center",
+            "E1",
+            "E2",
+            "E3"
+          ],
+          "properties": {
+            "center": {
+              "type": "string"
+            },
+            "E1": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "E2": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "E3": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

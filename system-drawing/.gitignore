@@ -1,0 +1,4 @@
+# check.py writes a PNG next to each sheet; rebuild it from the HTML.
+*.png
+__pycache__/
+.DS_Store

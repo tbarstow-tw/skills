@@ -1,0 +1,163 @@
+# System drawing model: Effect Cluster message delivery with SQL message storage.
+# Run from the skill folder:
+# Build: python3 kit/build.py examples/question-effect-cluster-delivery.model.yaml
+# Check: python3 kit/check.py examples/question-effect-cluster-delivery.html
+# Locators: python3 kit/locators.py examples/question-effect-cluster-delivery.model.yaml --repo effect=<your clone of Effect-TS/effect>
+
+subject:
+  mode: question
+  kicker: "System drawing · Effect Cluster"
+  title: "Cluster message delivery"
+  question: "How does a message to a cluster entity travel from the caller to the entity on the runner that owns its shard, and where can delivery fail, stall or run twice?"
+  decision: "Which delivery guarantees a service team gets from Effect Cluster with SQL message storage, and which failure modes the team must handle itself."
+  dwg_no: SYS-CLUSTER-001
+  rev: A
+  date: "2026-11-01"
+  scope_note: "Persisted requests, SQL storage"
+  general_notes:
+    - "Codes on the drawing. Values, operations and evidence are in the tables and the register below the sheet."
+    - "Snapshot of Effect main at the commit under Source. Rebuild from fresh sources before reuse."
+    - "Library subject. Components are runtime roles and stores that Effect Cluster defines. CLIENT is the caller role, SERVICE the owner runner."
+    - "Every data edge runs through the SQL client driver C8, a SqlClient from a driver package such as the pg driver. C8 is off the plan."
+    - "Budgets are ShardingConfig defaults unless noted. T4, N1 and N2 are fixed in code."
+    - "VERIFIED means read in code. DOCUMENTED means stated in JSDoc only. A ? after a code means INFERRED."
+  sources:
+    - {name: effect, ref: origin/main, sha: e1edcdc8d60bef515a2c5fa97706d4baaf0c0290, date: "2026-11-01"}
+
+lanes: [CLIENT, DATA, PLATFORM, SERVICE]
+
+components:
+  - {code: C1, name: Caller code, kind: service, lane: CLIENT, scope: TOUCH, responsibility: "Team code that gets a typed client with Entity.client and calls an entity RPC.", evidence: [e1], confidence: VERIFIED}
+  - {code: C2, name: Sharding client, kind: service, lane: CLIENT, scope: FOCUS, responsibility: "Builds the envelope with a Snowflake request id and a shard id, saves persisted requests, routes to the owner and waits for the reply.", evidence: [e2, e3, e4], confidence: VERIFIED}
+  - {code: C3, name: Runner RPC client, kind: service, lane: PLATFORM, scope: TOUCH, responsibility: "One RPC client per runner address over HTTP, WebSocket or TCP. Maps transport errors to RunnerUnavailable.", evidence: [e9, e10, e11], confidence: VERIFIED}
+  - {code: C4, name: Runner server, kind: service, lane: SERVICE, scope: TOUCH, responsibility: "Receives runner RPCs. For a persisted request it registers a reply handler and wakes the read loop; it does not run the payload.", evidence: [e12], confidence: VERIFIED}
+  - {code: C5, name: Storage read loop, kind: job, lane: SERVICE, scope: FOCUS, responsibility: "Claims unprocessed messages for acquired shards and dispatches them to entity managers. Runs forever.", evidence: [e19, e20], confidence: VERIFIED}
+  - {code: C6, name: Lock manager, kind: job, lane: SERVICE, scope: FOCUS, responsibility: "Acquires, refreshes and releases shard locks. Resets old claims on new shards. Interrupts all entities when lock storage fails.", evidence: [e25, e26, e27], confidence: VERIFIED}
+  - {code: C7, name: Entity manager, kind: service, lane: SERVICE, scope: FOCUS, responsibility: "Activates the entity, holds the mailbox, runs the team's handler, restarts it on a defect, fences and saves the reply.", evidence: [e21, e22, e34], confidence: VERIFIED}
+  - {code: C8, name: SQL client driver, kind: service, lane: PLATFORM, scope: CONTEXT, plan: false, responsibility: "SqlClient service from a driver package, such as the pg driver. Carries every data edge.", evidence: [e37, e38], confidence: VERIFIED}
+  - {code: D1, name: Messages table, kind: store, lane: DATA, scope: FOCUS, responsibility: "cluster_messages: one row per request or envelope, with processed, last_read lease, deliver_at and a unique message_id for keyed payloads.", evidence: [e14, e17], confidence: VERIFIED}
+  - {code: D2, name: Replies table, kind: store, lane: DATA, scope: FOCUS, responsibility: "cluster_replies: chunk and exit replies. At most one exit reply per request.", evidence: [e16, e39], confidence: VERIFIED}
+  - {code: D3, name: Shard locks, kind: store, lane: DATA, scope: TOUCH, responsibility: "Advisory locks on PostgreSQL and MySQL; a lease table with expiry on other dialects.", evidence: [e30, e42], confidence: VERIFIED}
+  - {code: D4, name: Runner registry, kind: store, lane: DATA, scope: CONTEXT, responsibility: "cluster_runners: registered runners, health and heartbeat. Callers derive shard owners from it.", evidence: [e31, e40], confidence: VERIFIED}
+
+interfaces:
+  - {code: I1, name: entity request, from: C1, to: C2, style: sync, protocol: in-process, operation: "Typed RPC call on the entity client; persisted when the RPC carries the Persisted annotation", auth: "none (same process)", gate: "none", timeout: none, retries: none, failure: "Typed errors from I2, I4, I5", evidence: [e1, e33], confidence: VERIFIED}
+  - {code: I2, name: save request, from: C2, to: D1, style: data, protocol: SQL, operation: "INSERT the request before any network call. Keyed payloads conflict on message_id and return Duplicate with the last reply", auth: "Database credentials of the SqlClient", gate: "Persisted requests only", timeout: none, retries: none, failure: "PersistenceError to the caller", evidence: [e6, e17, e18], confidence: VERIFIED}
+  - {code: I3, name: persisted send, from: C2, to: C3, style: sync, protocol: in-process, operation: "Runners.notify with the owner address from shard assignments; no owner means wait on storage", auth: "none (same process)", gate: "Owner is another runner and the save was not a duplicate", timeout: none, retries: none, failure: "Any error: poll replies (I11)", evidence: [e7, e4], confidence: VERIFIED}
+  - {code: I4, name: volatile send, from: C2, to: C3, style: sync, protocol: in-process, operation: "Runners.send for a request without Persisted; nothing is stored", auth: "none (same process)", gate: "Not persisted", timeout: none, retries: unbounded, failure: "Retry every T1 on no owner", evidence: [e5], confidence: VERIFIED}
+  - {code: I5, name: runner RPC, from: C3, to: C4, style: sync, protocol: Runner RPC, operation: "Effect or Stream RPC with the encoded envelope and a persisted flag; Notify and Envelope (ack, interrupt) RPCs", auth: "[TBD]", gate: "none", timeout: "[TBD]", retries: none, failure: "RunnerUnavailable to C2", evidence: [e9, e10, e11], confidence: VERIFIED}
+  - {code: I6, name: wake read loop, from: C4, to: C5, style: async, protocol: in-process, operation: "sharding.notify with waitUntilRead opens the storage read latch", auth: "none (same process)", gate: "Shard acquired by this runner", timeout: none, retries: none, failure: "EntityNotAssignedToRunner", evidence: [e12, e13], confidence: VERIFIED}
+  - {code: I7, name: claim messages, from: C5, to: D1, style: data, protocol: SQL, operation: "UPDATE last_read on unprocessed rows of acquired shards with no exit reply and no unacked chunk, whose lease is older than T4, in batches of N4", auth: "Database credentials of the SqlClient", gate: "Latch opened by I6 or every T3", timeout: none, retries: unbounded, failure: "Logged; next poll retries", evidence: [e14, e15, e20], confidence: VERIFIED}
+  - {code: I8, name: dispatch message, from: C5, to: C7, style: sync, protocol: in-process, operation: "Decode, skip ids already active or processed, check mailbox capacity N3, write to the entity RPC server", auth: "none (same process)", gate: "Entity type registered within T9", timeout: none, retries: unbounded, failure: "MailboxFull: resumption retries", evidence: [e19, e21, e41], confidence: VERIFIED}
+  - {code: I9, name: confirm shard lock, from: C7, to: D3, style: data, protocol: SQL, operation: "Refresh this shard's lock before saving a persisted reply; one shared refresh per shard", auth: "Database credentials of the SqlClient", gate: "Persisted request", timeout: T7, retries: none, failure: "Reply dropped; request re-runs", evidence: [e22, e24], confidence: VERIFIED}
+  - {code: I10, name: save reply, from: C7, to: D2, style: data, protocol: SQL, operation: "One transaction: UPDATE D1 processed for the request, INSERT the exit reply. Chunks only set last_reply_id", auth: "Database credentials of the SqlClient", gate: "Lock confirmed by I9", timeout: none, retries: N1, failure: "Defect after N1 retries", evidence: [e16, e22, e23], confidence: VERIFIED}
+  - {code: I11, name: poll replies, from: C2, to: D2, style: data, protocol: SQL, operation: "Read replies for waiting requests every T2 until an exit reply arrives", auth: "Database credentials of the SqlClient", gate: "Persisted request waiting on storage", timeout: none, retries: unbounded, failure: "No deadline; caller waits", evidence: [e8], confidence: VERIFIED}
+  - {code: I12, name: acquire and refresh, from: C6, to: D3, style: data, protocol: SQL, operation: "Acquire locks for assigned shards; refresh held locks every T7 with N2 retries", auth: "Database credentials of the SqlClient", gate: "none", timeout: T7, retries: N2, failure: "Interrupt every entity", evidence: [e26, e27, e28, e30], confidence: VERIFIED}
+  - {code: I13, name: reset claims, from: C6, to: D1, style: data, protocol: SQL, operation: "resetShards clears last_read on newly acquired shards so the previous owner's claims are visible again", auth: "Database credentials of the SqlClient", gate: "After a lock is acquired", timeout: T7, retries: none, failure: "Ignored; rows wait for T4", evidence: [e25], confidence: VERIFIED}
+  - {code: I14, name: read runners, from: C2, to: D4, style: data, protocol: SQL, operation: "getRunners, then a hash ring maps shards to runners; repeats every refreshAssignmentsInterval", auth: "Database credentials of the SqlClient", gate: "none", evidence: [e40, e43, e44], confidence: VERIFIED}
+
+flows:
+  - {id: persisted, name: "Persisted request to a remote owner", trigger: "Caller calls a Persisted entity RPC whose shard another runner owns", critical: true, steps: [I1, I2, I3, I5, I6, I7, I8, I9, I10], evidence: [e6, e7, e12, e14, e22]}
+  - {id: fallback, name: "Owner missing or RPC fails: caller waits on storage", trigger: "No owner in shard assignments, or any I5 error", steps: [I1, I2, I3, I11], evidence: [e7, e8]}
+  - {id: volatile, name: "Volatile request", trigger: "RPC without the Persisted annotation", steps: [I1, I4, I5], evidence: [e5]}
+  - {id: takeover, name: "New owner takes a shard", trigger: "Rebalance or a runner stops refreshing its locks", steps: [I12, I13, I7], evidence: [e25, e26]}
+
+boundaries:
+  - {code: B1, name: Caller process, kind: deploy, members: [C1, C2, C3], enforced_by: "Any runner or client-only process that holds an entity client", evidence: [e2, e10], confidence: VERIFIED}
+  - {code: B2, name: Owner runner, kind: deploy, members: [C4, C5, C6, C7], enforced_by: "The runner process that holds the lock for the shard", evidence: [e12, e25], confidence: VERIFIED}
+  - {code: B3, name: Shard ownership, kind: trust, members: [C5, C7], enforced_by: "Only acquired shards are claimed (I7) and each persisted reply is fenced by a lock refresh (I9). No fencing token in the SQL writes.", evidence: [e19, e24], confidence: VERIFIED}
+  - {code: B4, name: SQL database, kind: deploy, members: [D1, D2, D3, D4], enforced_by: "One SqlClient. Tables share the cluster prefix. Default layers run migrations and need DDL rights.", evidence: [e38, e31], confidence: VERIFIED}
+
+budgets:
+  - {code: T1, name: send retry interval, value: "100 ms", applies_to: "I4", evidence: [e29, e5], confidence: VERIFIED}
+  - {code: T2, name: reply poll interval, value: "200 ms", applies_to: "I11", evidence: [e29, e8], confidence: VERIFIED}
+  - {code: T3, name: message poll interval, value: "10 s", applies_to: "I7 when no notify arrives", evidence: [e29, e20], confidence: VERIFIED}
+  - {code: T4, name: claim lease, value: "10 min", applies_to: "I7; fixed in SQL text", evidence: [e15], confidence: VERIFIED}
+  - {code: T5, name: lock refresh interval, value: "10 s", applies_to: "I12", evidence: [e29], confidence: VERIFIED}
+  - {code: T6, name: lock expiration, value: "35 s", applies_to: "lease rows and session timeout", evidence: [e29, e30], confidence: VERIFIED}
+  - {code: T7, name: lock check timeout, value: "10 s", formula: "T7 = min(T5, T6 / 3)", applies_to: "I9, I12, I13", evidence: [e28], confidence: VERIFIED}
+  - {code: T8, name: defect restart delay, value: "0.5-10 s", applies_to: "exponential, capped, no limit", evidence: [e35], confidence: VERIFIED}
+  - {code: T9, name: registration timeout, value: "1 min", applies_to: "I8; then a defect reply", evidence: [e29], confidence: VERIFIED}
+  - {code: N1, name: reply save retries, value: "4", applies_to: "I10; 0 for a success in a transaction", evidence: [e22, e23], confidence: VERIFIED}
+  - {code: N2, name: lock refresh retries, value: "5", applies_to: "I12, inside T7", evidence: [e26], confidence: VERIFIED}
+  - {code: N3, name: mailbox capacity, value: "4096", applies_to: "per entity", evidence: [e29, e21], confidence: VERIFIED}
+  - {code: N4, name: claim batch size, value: "1024", applies_to: "I7", evidence: [e29], confidence: VERIFIED}
+  - {code: N5, name: shards per group, value: "300", applies_to: "shard id from entity id hash", evidence: [e29, e3], confidence: VERIFIED}
+
+notes:
+  - {n: 1, at: C2, text: "A persisted send writes D1 before any network call. Any I5 error falls back to I11, which has no deadline.", evidence: [e6, e7, e8]}
+  - {n: 2, at: C2, text: "A volatile send stores nothing and retries without limit every T1 while no runner owns the shard or the owner is down.", evidence: [e5]}
+  - {n: 3, at: D1, text: "Dedup works only when the payload has a PrimaryKey. Without one, a caller resend is a new message.", evidence: [e17, e18]}
+  - {n: 4, at: C7, text: "The handler can run twice: defect restart, fenced reply, interrupt, failed commit. JSDoc: handlers must tolerate retries.", evidence: [e34, e22, e36, e32]}
+  - {n: 5, at: D3, text: "I9 checks the lock after the handler ran, so an old owner's side effects can repeat on the new owner.", confidence: INFERRED, evidence: [e22, e24]}
+  - {n: 6, at: C5, text: "Pickup waits up to T3 without a notify. If I13 fails after a crash, claimed rows stay hidden until T4 ends.", evidence: [e20, e25, e15]}
+  - {n: 7, at: C6, text: "If I12 fails N2 times or passes T7, the runner interrupts every entity it hosts and claims nothing until a probe passes.", evidence: [e26, e27]}
+  - {n: 8, at: D2, text: "An unacked chunk reply keeps its request from being claimed again. Acks never expire.", confidence: INFERRED, evidence: [e14]}
+  - {n: 9, text: "Persisted requests act as at-least-once. No document in the repository states a delivery guarantee.", confidence: INFERRED, evidence: [e32]}
+
+unknowns:
+  - {item: "Intended delivery guarantee: no README or doc says at-least-once or exactly-once", resolve_by: "Ask the Effect maintainers; read the ai-docs cluster pages at the pinned commit", blocks_decision: true}
+  - {item: "What the entity RPC server does when a reply save dies after N1 retries: the request stalls or re-runs", resolve_by: "Trace the defect path in RpcServer.makeNoSerialization; add a test that fails saveReply five times", blocks_decision: true}
+  - {item: "How long an old owner keeps running a handler after it loses the shard lock", resolve_by: "Test with a paused runner and a short shardLockExpiration on PostgreSQL", blocks_decision: true}
+  - {item: "Runner RPC timeout and auth on the HTTP transport (I5)", resolve_by: "Read makeProtocolHttp and the platform HttpClient defaults", blocks_decision: false}
+  - {item: "Lock release for a frozen runner on PostgreSQL before version 14 (no idle_session_timeout)", resolve_by: "Read SqlRunnerStorage connection setup; test on PostgreSQL 13", blocks_decision: false}
+
+evidence:
+  - {tag: e1, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Entity.ts:302-306", what: "Entity.client gets a client from Sharding"}
+  - {tag: e2, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1643-1672", what: "Sharding client builds requests with Snowflake ids"}
+  - {tag: e3, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:343-346", what: "Shard id from the entity id hash"}
+  - {tag: e4, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1361-1384", what: "sendOutgoing picks the owner and the persisted path"}
+  - {tag: e5, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1390-1408", what: "Retry on no owner or unavailable runner every sendRetryInterval"}
+  - {tag: e6, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Runners.ts:225-260", what: "Save the request first; duplicate returns the last reply"}
+  - {tag: e7, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Runners.ts:484-501", what: "Notify: direct RPC, any error falls back to storage replies"}
+  - {tag: e8, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Runners.ts:448-457", what: "Reply poll every entityReplyPollInterval, forever"}
+  - {tag: e9, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Runners.ts:562-614", what: "Runner RPC protocol"}
+  - {tag: e10, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Runners.ts:730-762", what: "RPC client errors become RunnerUnavailable"}
+  - {tag: e11, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/HttpRunner.ts:49-131", what: "HTTP and WebSocket runner client protocols"}
+  - {tag: e12, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/RunnerServer.ts:93-119", what: "Persisted request: register reply handler, wake read loop"}
+  - {tag: e13, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1300-1319", what: "notify opens the storage read latch"}
+  - {tag: e14, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlMessageStorage.ts:465-493", what: "Claim query (pg)"}
+  - {tag: e15, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlMessageStorage.ts:386-391", what: "Ten-minute claim lease in SQL text"}
+  - {tag: e16, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlMessageStorage.ts:622-636", what: "saveReply transaction"}
+  - {tag: e17, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlMessageStorage.ts:346-384", what: "Insert with conflict on message_id"}
+  - {tag: e18, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Envelope.ts:468-477", what: "Primary key only for PrimaryKey payloads"}
+  - {tag: e19, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:881-938", what: "Read loop routes claimed messages to entity managers"}
+  - {tag: e20, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1086-1103", what: "Read loop forever; latch opened every entityMessagePollInterval"}
+  - {tag: e21, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/entityManager.ts:754-842", what: "sendLocal: dedup by request id and mailbox capacity"}
+  - {tag: e22, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/entityManager.ts:401-463", what: "Reply fence, retries and orDie"}
+  - {tag: e23, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/entityManager.ts:1079-1082", what: "retryRespond spacing"}
+  - {tag: e24, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1989-2022", what: "confirmShardLock refreshes one shard lock"}
+  - {tag: e25, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:648-660", what: "Acquire, then resetShards with errors ignored"}
+  - {tag: e26, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:737-750", what: "Lock refresh retries and timeout"}
+  - {tag: e27, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:700-722", what: "Unhealthy lock storage interrupts all shards"}
+  - {tag: e28, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/shardLock.ts:7-11", what: "Effective lock interval"}
+  - {tag: e29, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/ShardingConfig.ts:227-252", what: "ShardingConfig defaults"}
+  - {tag: e30, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlRunnerStorage.ts:347-365", what: "Lease-table lock acquire with expiry"}
+  - {tag: e31, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlRunnerStorage.ts:824-874", what: "Runners and locks tables"}
+  - {tag: e32, kind: doc, locator: "effect@e1edcdc:packages/effect/src/cluster/ClusterSchema.ts:65-69", what: "JSDoc: handlers must tolerate retries"}
+  - {tag: e33, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/ClusterSchema.ts:47-49", what: "Persisted defaults to false"}
+  - {tag: e34, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/entityManager.ts:541-546", what: "restartFrom replays in-flight requests"}
+  - {tag: e35, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/entityManager.ts:999-1002", what: "Default defect retry policy"}
+  - {tag: e36, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/internal/entityManager.ts:381-399", what: "Interrupted persisted request is left for replay"}
+  - {tag: e37, kind: code, locator: "effect@e1edcdc:packages/sql/pg/src/PgClient.ts:454-462", what: "pg driver provides SqlClient"}
+  - {tag: e38, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlMessageStorage.ts:1182-1206", what: "Layers need SqlClient and run migrations"}
+  - {tag: e39, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlMessageStorage.ts:1061-1073", what: "Replies table unique keys"}
+  - {tag: e40, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1480-1500", what: "Caller reads runners to build shard assignments"}
+  - {tag: e41, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1140-1180", what: "Resumption after MailboxFull"}
+  - {tag: e42, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/SqlRunnerStorage.ts:484-492", what: "Advisory locks on pg and mysql"}
+  - {tag: e43, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1557-1576", what: "Hash ring maps shards to runners"}
+  - {tag: e44, kind: code, locator: "effect@e1edcdc:packages/effect/src/cluster/Sharding.ts:1597", what: "Assignment loop sleeps refreshAssignmentsInterval"}
+
+key_figures:
+  - {code: T3, label: "message poll", value: "10 s"}
+  - {code: T4, label: "claim lease", value: "10 min"}
+  - {code: T6, label: "lock expiration", value: "35 s"}
+  - {code: T7, label: "lock check timeout", value: "10 s"}
+  - {code: T2, label: "reply poll", value: "200 ms"}
+  - {code: N1, label: "reply save retries", value: "4"}
+  - {code: I11, label: "reply wait deadline", value: "none"}
+
+views:
+  sequence_flow: persisted
+  detail: failure
+  failure_interface: I10
